@@ -7,16 +7,20 @@ class FeedViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var showToast = false
     @Published var isLoading = false
+    @Published var isConnected = true
     
     private let repository: FeedRepository
     private let networkMonitor = NetworkMonitor.shared
+    private var cancellables = Set<AnyCancellable>()
     
     var isOffline: Bool {
-        !networkMonitor.isConnected
+        !isConnected
     }
     
     init(repository: FeedRepository = FeedRepository()) {
         self.repository = repository
+        isConnected = networkMonitor.isConnected
+        observeNetworkChanges()
     }
     
     func loadFeed() {
@@ -54,6 +58,22 @@ class FeedViewModel: ObservableObject {
                 // We can just let the ObservableObject update handle it.
             }
         }
+    }
+
+    private func observeNetworkChanges() {
+        networkMonitor.$isConnected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] connected in
+                guard let self else { return }
+                self.isConnected = connected
+                if connected {
+                    self.errorMessage = nil
+                    self.showToast = false
+                    self.loadFeed()
+                }
+            }
+            .store(in: &cancellables)
     }
 }
 

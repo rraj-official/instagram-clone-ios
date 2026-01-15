@@ -1,106 +1,135 @@
 import SwiftUI
 import AVKit
 
-struct ReelPlayerView: View {
-    let url: URL
-    @State private var player: AVPlayer?
-    @Binding var isMuted: Bool
-    let isVisible: Bool
+// MARK: - Aspect-fill AVPlayer for Instagram-like zoomed video
+private struct AspectFillPlayerView: UIViewRepresentable {
+    let player: AVPlayer
     
-    var body: some View {
-        VideoPlayer(player: player)
-            .onAppear {
-                setupPlayer()
-            }
-            .onChange(of: isVisible) { visible in
-                if visible {
-                    player?.play()
-                } else {
-                    player?.pause()
-                }
-            }
-            .onChange(of: isMuted) { muted in
-                player?.isMuted = muted
-            }
-            .onDisappear {
-                player?.pause()
-            }
+    func makeUIView(context: Context) -> PlayerContainerView {
+        let view = PlayerContainerView()
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = .resizeAspect
+        view.clipsToBounds = true
+        return view
     }
     
-    private func setupPlayer() {
-        if player == nil {
-            player = AVPlayer(url: url)
-            player?.isMuted = isMuted
-        }
-        if isVisible {
-            player?.play()
-        }
+    func updateUIView(_ uiView: PlayerContainerView, context: Context) {
+        uiView.playerLayer.player = player
+    }
+    
+    final class PlayerContainerView: UIView {
+        override static var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
     }
 }
 
-struct SingleReelView: View {
+// MARK: - Single Reel Page
+private struct ReelPageView: View {
     @ObservedObject var reel: ReelEntity
     @Binding var isMuted: Bool
     let isVisible: Bool
     let onLikeTapped: () -> Void
     
-    // UI Interactions
+    @State private var player = AVPlayer()
+    @State private var isPaused = false
     @State private var isHeartAnimating = false
     @State private var isHeartOverlayVisible = false
-    @State private var isPaused = false
     
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            // Video Layer
-            if let videoURL = reel.reelVideoURL, let url = URL(string: videoURL) {
-                ReelPlayerView(url: url, isMuted: $isMuted, isVisible: isVisible && !isPaused)
+            videoLayer
+            if isHeartOverlayVisible { heartOverlay }
+            if isPaused { pauseIndicator }
+            overlayUI
+        }
+        .contentShape(Rectangle())
+        .background(Color.black)
+        .gesture(doubleTapLikeGesture)
+        .simultaneousGesture(singleTapPauseGesture)
+        .onAppear(perform: configurePlayerIfNeeded)
+        .onChange(of: isVisible) { newValue in
+            newValue && !isPaused ? player.play() : player.pause()
+        }
+        .onChange(of: isMuted) { muted in
+            player.isMuted = muted
+        }
+        .onDisappear {
+            player.pause()
+        }
+    }
+    
+    private var videoLayer: some View {
+        Group {
+            if let urlString = reel.reelVideoURL, let url = URL(string: urlString) {
+                AspectFillPlayerView(player: player)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .edgesIgnoringSafeArea(.all)
-                    .onTapGesture {
-                        isPaused.toggle()
-                    }
-                    // Double Tap to Like
-                    .onTapGesture(count: 2) {
-                        if !reel.likedByUser {
-                            onLikeTapped()
-                        }
-                        animateBigHeart()
-                    }
+                    .clipped()
+                    .ignoresSafeArea()
             } else {
                 Color.black
             }
-            
-            // Big Heart Overlay
-            if isHeartOverlayVisible {
-                Image(systemName: "heart.fill")
-                    .font(.system(size: 100))
-                    .foregroundColor(.white)
-                    .shadow(radius: 10)
-                    .scaleEffect(isHeartAnimating ? 1.3 : 0.8)
-                    .opacity(isHeartAnimating ? 0 : 1)
-            }
-            
-            // Pause Indicator
+        }
+    }
+    
+    private var overlayUI: some View {
+        IGReelOverlay(
+            reel: reel,
+            onLikeTapped: {
+                let generator = UIImpactFeedbackGenerator(style: .medium)
+                generator.impactOccurred()
+                onLikeTapped()
+            },
+            onCommentTapped: {},
+            onShareTapped: {},
+            onMoreTapped: {}
+        )
+    }
+    
+    private var pauseIndicator: some View {
+        Image(systemName: "play.fill")
+            .font(.system(size: 60))
+            .foregroundColor(.white.opacity(0.85))
+            .shadow(radius: 10)
+    }
+    
+    private var heartOverlay: some View {
+        Image(systemName: "heart.fill")
+            .font(.system(size: 110))
+            .foregroundColor(.white)
+            .shadow(radius: 10)
+            .scaleEffect(isHeartAnimating ? 1.25 : 0.8)
+            .opacity(isHeartAnimating ? 0 : 1)
+    }
+    
+    private var singleTapPauseGesture: some Gesture {
+        TapGesture(count: 1).onEnded {
+            isPaused.toggle()
             if isPaused {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 60))
-                    .foregroundColor(.white.opacity(0.8))
-                    .shadow(radius: 10)
+                player.pause()
+            } else if isVisible {
+                player.play()
             }
-            
-            // Overlay UI (Right actions + Bottom info)
-            IGReelOverlay(
-                reel: reel,
-                onLikeTapped: {
-                    // Haptic
-                    let generator = UIImpactFeedbackGenerator(style: .medium)
-                    generator.impactOccurred()
-                    onLikeTapped()
-                },
-                onCommentTapped: {},
-                onShareTapped: {},
-                onMoreTapped: {}
-            )
+        }
+    }
+    
+    private var doubleTapLikeGesture: some Gesture {
+        TapGesture(count: 2).onEnded {
+            if !reel.likedByUser {
+                onLikeTapped()
+            }
+            animateBigHeart()
+        }
+    }
+    
+    private func configurePlayerIfNeeded() {
+        guard player.currentItem == nil,
+              let urlString = reel.reelVideoURL,
+              let url = URL(string: urlString) else { return }
+        
+        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        player.isMuted = isMuted
+        if isVisible {
+            player.play()
         }
     }
     
@@ -126,39 +155,40 @@ struct SingleReelView: View {
     }
 }
 
+// MARK: - Reels Screen
 struct ReelsView: View {
     @StateObject private var viewModel = ReelsViewModel()
     @State private var currentReelIndex = 0
     @State private var isMuted = true
+    @State private var scrollPosition: Int? = 0
     
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            GeometryReader { geometry in
-                // Vertical paging using TabView with rotation hack
-                TabView(selection: $currentReelIndex) {
-                    ForEach(Array(viewModel.reels.enumerated()), id: \.element.objectID) { index, reel in
-                        SingleReelView(
-                            reel: reel,
-                            isMuted: $isMuted,
-                            isVisible: currentReelIndex == index,
-                            onLikeTapped: {
-                                viewModel.toggleLike(for: reel)
-                            }
-                        )
-                        .tag(index)
-                        .rotationEffect(.degrees(-90))
-                        // CRITICAL: Match width to height and height to width of CONTAINER because the parent is rotated 90 degrees.
-                        // The frame inside the rotated view must essentially swap dimensions relative to the geometry reader.
-                        .frame(width: geometry.size.width, height: geometry.size.height)
+            ScrollViewReader { _ in
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(viewModel.reels.enumerated()), id: \.offset) { index, reel in
+                            ReelPageView(
+                                reel: reel,
+                                isMuted: $isMuted,
+                                isVisible: currentReelIndex == index,
+                                onLikeTapped: {
+                                    viewModel.toggleLike(for: reel)
+                                }
+                            )
+                            .frame(maxWidth: .infinity)
+                            .containerRelativeFrame(.vertical)
+                            .background(Color.black)
+                            .id(index)
+                        }
                     }
                 }
-                .rotationEffect(.degrees(90))
-                .frame(width: geometry.size.height, height: geometry.size.width)
-                .position(x: geometry.size.width / 2, y: geometry.size.height / 2) // Ensure centered
-                .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
+                .scrollIndicators(.hidden)
+                .scrollTargetLayout()
+                .scrollTargetBehavior(.paging)
+                .scrollPosition(id: $scrollPosition)
                 .ignoresSafeArea()
             }
-            .ignoresSafeArea()
             
             // Mute Toggle
             Button(action: { isMuted.toggle() }) {
@@ -173,7 +203,12 @@ struct ReelsView: View {
         }
         .onAppear {
             viewModel.loadReels()
+            scrollPosition = 0
         }
+        .onChange(of: scrollPosition) { newValue in
+            currentReelIndex = newValue ?? 0
+        }
+        .background(Color.black)
     }
 }
 
